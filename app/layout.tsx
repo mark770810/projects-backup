@@ -1,28 +1,12 @@
-import type { Metadata } from "next";
-import { Inter } from "next/font/google";
-import "./globals.css";
-
-// 使用 Inter 字体替代 Geist
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-});
-
-export const metadata: Metadata = {
-  title: "AI Knowledge Base",
-  description: "Powered by Next.js + Supabase + OpenAI",
+export const metadata = {
+  title: "AI 知识库系统",
+  description: "智能问答 + 文档向量化 + 文件管理",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }) {
   return (
-    <html lang="en">
-      <body className={`${inter.variable} antialiased`}>
-        {children}
-      </body>
+    <html lang="zh">
+      <body style={{ margin: 0, padding: 0 }}>{children}</body>
     </html>
   );
 }
