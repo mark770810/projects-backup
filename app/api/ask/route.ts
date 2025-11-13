@@ -1,42 +1,59 @@
+/**
+ * 让该 API 永远以动态方式运行，避免被 Next.js 静态优化
+ * 并强制使用 Node.js 运行环境（Supabase + OpenAI 需要 Node 环境）
+ */
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
+// Supabase（必须使用服务端 Key 且只在 Node 环境下运行）
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
+  process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+  {
+    auth: {
+      persistSession: false,
+    },
+  }
 );
 
+// API2D / OpenAI 客户端
 const openai = new OpenAI({
-  baseURL: process.env.OPENAI_API_BASE!,
-  apiKey: process.env.API2D_KEY!,
+  baseURL: process.env.OPENAI_API_BASE ?? "",
+  apiKey: process.env.API2D_KEY ?? "",
 });
 
 export async function POST(req: Request) {
   try {
-    const { question } = await req.json();
-    if (!question) {
-      return NextResponse.json({ error: "缺少问题参数" }, { status: 400 });
+    const body = await req.json();
+    const question = body?.question;
+
+    if (!question || question.trim() === "") {
+      return NextResponse.json({ error: "缺少问题参数 question" }, { status: 400 });
     }
 
-    // Step 1: 生成查询向量
+    // Step 1: 生成查询向量（Embedding）
     const embeddingRes = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: question,
     });
+
     const queryEmbedding = embeddingRes.data[0].embedding;
 
-    // Step 2: 从 Supabase 检索最相似的文本
+    // Step 2: 查询 Supabase 向量相似度
     const { data: matches, error: matchError } = await supabase.rpc(
       "match_embeddings",
       {
         query_embedding: queryEmbedding,
-        match_count: 3, // 返回前 3 条最相似记录
+        match_count: 3,
       }
     );
 
     if (matchError) {
-      console.error("数据库查询出错：", matchError);
+      console.error("🔴 Supabase 向量查询出错:", matchError);
       return NextResponse.json({ error: "数据库查询失败" }, { status: 500 });
     }
 
@@ -44,17 +61,17 @@ export async function POST(req: Request) {
       return NextResponse.json({ answer: "未找到相关内容。" });
     }
 
-    // 拼接最相关的上下文内容
+    // 拼接最相关内容
     const contextText = matches.map((m) => m.content).join("\n");
 
-    // Step 3: 让 GPT 生成回答
+    // Step 3: 调用 GPT（API2D）
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
         {
           role: "system",
           content:
-            "你是一个知识问答助手，根据提供的文本内容回答问题，回答时尽量简洁准确。",
+            "你是一个知识库问答助手，根据给定的上下文回答问题。回答要简洁准确，不要编造内容。",
         },
         {
           role: "user",
@@ -63,13 +80,17 @@ export async function POST(req: Request) {
       ],
     });
 
-    const answer = completion.choices[0].message?.content || "无法生成回答。";
+    const answer =
+      completion.choices[0].message?.content ?? "无法生成回答。";
 
     return NextResponse.json({ answer });
   } catch (err: any) {
-    console.error("❌ 出错：", err);
+    console.error("❌ ask API 出错：", err);
     return NextResponse.json(
-      { error: "请求失败", detail: err.message },
+      {
+        error: "服务器内部错误",
+        detail: err?.message ?? err,
+      },
       { status: 500 }
     );
   }

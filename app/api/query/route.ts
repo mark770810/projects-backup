@@ -1,55 +1,63 @@
-// ✅ 指定 Node.js 运行环境（防止 Edge Runtime 报错）
-export const runtime = "nodejs";
+/**
+ * 🚀 强制：不要静态化，不要运行在 Edge runtime！
+ * 这是一个 RAG + 向量检索 API，必须在 Node.js 下运行。
+ */
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import OpenAI from "openai";
 
-// ✅ 初始化 Supabase 客户端
+/** 🔐 Supabase（服务端）客户端 */
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
+  process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+  {
+    auth: {
+      persistSession: false,
+    },
+  }
 );
 
-// ✅ 初始化 OpenAI(API2D) 客户端
+/** 🤖 OpenAI / API2D 客户端 */
 const openai = new OpenAI({
-  apiKey: process.env.API2D_KEY!,
+  apiKey: process.env.API2D_KEY ?? "",
   baseURL: process.env.OPENAI_API_BASE || "https://api.api2d.net",
 });
 
-// ✅ 主逻辑：根据问题匹配向量并生成回答
+/** 🧠 主逻辑：向量匹配 + RAG 问答 */
 export async function POST(req: Request) {
-  console.log("💬 [问答流程启动] 正在执行向量匹配 + 智能中文回答生成...");
+  console.log("🔵 [QUERY API] 执行向量检索 + 智能回答...");
 
   try {
-    // ✅ 解码请求体（防止中文乱码）
+    // 🔍 用 req.text 解析可以避免中文乱码
     const raw = await req.text();
     const body = JSON.parse(raw);
-    const { question, threshold = 0.3, topK = 5 } = body;
+
+    const { question, threshold = 0.3, topK = 5 } = body || {};
 
     if (!question?.trim()) {
-      console.warn("⚠️ 接收到空问题");
       return NextResponse.json({ error: "问题不能为空" }, { status: 400 });
     }
 
-    console.log(`🧠 收到问题: ${question}`);
-    console.log(`🎯 匹配阈值: ${threshold} | 返回数量: ${topK}`);
+    console.log("❓ 问题：", question);
+    console.log("🎯 阈值:", threshold, " | topK:", topK);
 
-    // 1️⃣ 生成问题的向量 Embedding
+    /** 1️⃣ 创建 Embedding */
     const embeddingRes = await openai.embeddings.create({
       model: "text-embedding-3-small",
       input: question,
     });
-    const queryEmbedding = embeddingRes.data[0]?.embedding;
 
+    const queryEmbedding = embeddingRes.data[0]?.embedding;
     if (!queryEmbedding) {
-      throw new Error("向量生成失败，请检查 OpenAI API Key 或模型设置。");
+      throw new Error("向量生成失败，请检查 API Key 或模型。");
     }
 
-    // 2️⃣ 调用数据库向量匹配函数（与你 Supabase 中定义的函数一致）
+    /** 2️⃣ 调用 Supabase 的向量匹配 */
     let { data: matches, error: matchError } = await supabase.rpc(
-      "match_documents", // ✅ 修正函数名
+      "match_documents",
       {
         query_embedding: queryEmbedding,
         match_threshold: threshold,
@@ -58,13 +66,13 @@ export async function POST(req: Request) {
     );
 
     if (matchError) {
-      console.error("❌ 向量匹配失败：", matchError.message);
-      throw new Error(`向量匹配失败：${matchError.message}`);
+      console.error("❌ 向量匹配失败:", matchError);
+      throw new Error(matchError.message);
     }
 
-    // 3️⃣ 若无结果则自动降低阈值重试
+    /** 3️⃣ 若无匹配，则降低阈值后重试 */
     if (!matches?.length) {
-      console.warn("⚠️ 未找到匹配内容，自动降低阈值至 0.15 重试...");
+      console.log("⚠️ 无匹配，降低 threshold=0.15 并扩大 topK 重试...");
       const retry = await supabase.rpc("match_documents", {
         query_embedding: queryEmbedding,
         match_threshold: 0.15,
@@ -73,9 +81,8 @@ export async function POST(req: Request) {
       matches = retry.data || [];
     }
 
-    // 4️⃣ 若仍无匹配，返回提示
+    /** 4️⃣ 若仍无数据 */
     if (!matches?.length) {
-      console.warn("⚠️ 数据库无匹配结果。");
       return NextResponse.json({
         question,
         answer: "资料中没有相关内容。",
@@ -83,23 +90,23 @@ export async function POST(req: Request) {
       });
     }
 
-    // 5️⃣ 拼接上下文内容
+    /** 5️⃣ 拼接上下文（控制最大长度） */
     const context = matches
       .map((m) => m.content)
       .filter(Boolean)
       .join("\n\n")
-      .slice(0, 4000); // 限制 token 长度
+      .slice(0, 4000);
 
-    console.log(`📚 命中 ${matches.length} 条内容，开始生成回答...`);
+    console.log(`📚 命中 ${matches.length} 条内容，开始生成答案...`);
 
-    // 6️⃣ 调用模型生成中文回答
+    /** 6️⃣ 调用 GPT（API2D / OpenAI）生成回答 */
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
           content:
-            "你是一个中文知识问答助手，请基于提供的上下文回答问题，不要编造。如果找不到答案，请回答：'资料中没有相关内容。'",
+            "你是一个中文知识库问答助手，请基于提供的上下文回答问题，不要编造。如果找不到答案，请回答：'资料中没有相关内容。'",
         },
         {
           role: "user",
@@ -114,7 +121,7 @@ export async function POST(req: Request) {
       completion.choices[0]?.message?.content?.trim() ||
       "资料中没有相关内容。";
 
-    // 7️⃣ 写入查询日志（可选表 query_logs）
+    /** 7️⃣ 写入查询日志（可选） */
     try {
       const logData = {
         question,
@@ -125,18 +132,20 @@ export async function POST(req: Request) {
         timestamp: new Date().toISOString(),
       };
 
-      const { error: logError } = await supabase
+      const { error: logErr } = await supabase
         .from("query_logs")
         .insert(logData);
 
-      if (logError)
-        console.warn("⚠️ 查询日志写入失败：", logError.message);
-      else console.log("🧾 查询日志成功：", logData);
-    } catch (logErr: any) {
-      console.warn("⚠️ 查询日志异常：", logErr.message);
+      if (logErr) {
+        console.warn("⚠️ 日志写入失败:", logErr.message);
+      } else {
+        console.log("🧾 日志写入成功");
+      }
+    } catch (err: any) {
+      console.warn("⚠️ 日志写入异常:", err.message);
     }
 
-    // 8️⃣ 返回结果给前端
+    /** 8️⃣ 返回结果 */
     return NextResponse.json({
       question,
       answer,
@@ -147,7 +156,7 @@ export async function POST(req: Request) {
       })),
     });
   } catch (err: any) {
-    console.error("🚨 问答接口异常：", err.message);
+    console.error("🚨 [QUERY API ERROR]:", err);
     return NextResponse.json(
       { error: `问答失败：${err.message}` },
       { status: 500 }
@@ -155,16 +164,14 @@ export async function POST(req: Request) {
   }
 }
 
-// ✅ 跨域支持（允许前端 fetch 请求）
+/** 🟡 OPTIONS 处理 CORS 预检 */
 export async function OPTIONS() {
-  return NextResponse.json(
-    {},
-    {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-      },
-    }
-  );
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
+  });
 }
